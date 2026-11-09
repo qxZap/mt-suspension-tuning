@@ -451,6 +451,7 @@ struct Corner {
     bool haveStraight = false; double straightX = 0, straightY = 0;  // the hub's x, y while not steered
     double spin = 0, lastSpin = 0;  // the wheel's roll angle about its axle (rad)
     double damperZ = 0;  // the damper's length scale, fixed once (0 = not yet): it telescopes, never squeezes
+    double linkRun[2] = {0, 0}, shaftRun = 0;  // lower arm links and shaft tube, fixed once: rigid, they swing and plunge
     int axle;       // 0 = the front axle, counted back: the Tuning section's "Axle 1, 2, ..."
 };
 struct Car {
@@ -1029,9 +1030,11 @@ static void pose(Corner& k, V hub, double steer, int kitMm, const Geo& g) {
                 place(k.piece[b ? P_BUSH2 : P_BUSH1], Bs[b], straight, V{aw, aw, aw});
                 V ld = sub(Bs[b], Jm); double ll = len(ld);
                 V u = ll > 1e-3 ? mul(ld, 1 / ll) : V{0, -k.side, 0};
-                double run = ll - (3.0 + 2.5) * aw;  // sunk 3 cm into the ball end and 2.5 short of the bushing centre
-                if (run < 0.01) run = 0.01;            // joined: the link shrinks away inside the ball and the bushing
-                place(k.piece[b ? P_LINK2 : P_LINK1], add(Jm, mul(u, 3.0 * aw)), yAlong(u), V{aw, run / 10, aw});
+                // rigid (the user, 2026-11-09: no tension, it swings down with the knuckle): the length is taken once,
+                // the link hangs from its bushing aimed at the ball, and the travel's small arc is lost inside the ball
+                if (k.linkRun[b] <= 0) { double r0 = ll - (3.0 + 2.5) * aw; k.linkRun[b] = r0 < 0.01 ? 0.01 : r0; }
+                double run = k.linkRun[b];
+                place(k.piece[b ? P_LINK2 : P_LINK1], sub(Bs[b], mul(u, 2.5 * aw + run)), yAlong(u), V{aw, run / 10, aw});
             }
         } else if (al > 1) place(k.piece[P_ARM], Jm, yAlong(mul(ad, 1 / al)), V{aw, al / 100, aw});
         if (k.driven) {
@@ -1063,7 +1066,9 @@ static void pose(Corner& k, V hub, double steer, int kitMm, const Geo& g) {
                 place(k.piece[P_BOOTC], Jc, spun(d), V{bs, bs, bs});
                 place(k.piece[P_CVIN], S, spun(d), V{bs, bs, bs});
                 place(k.piece[P_BOOTI], S, spun(mul(d, -1)), V{bs, bs, bs});
-                double run = sl - 18 * bs;
+                // rigid tube from the outer joint; its inner end plunges in the inner boot as the wheel travels
+                if (k.shaftRun <= 0) k.shaftRun = sl - 18 * bs;
+                double run = k.shaftRun;
                 if (run > 0.5) place(k.piece[P_SHAFT], add(Jc, mul(d, 9 * bs)), spun(d), V{bs, run / 10, bs});
                 return;
             }
@@ -1379,7 +1384,7 @@ static void saveFit() {
 }
 static void refit(long long id) {
     for (auto& c : cars)
-        if (c.id == id) for (auto& k : c.corners) { k.lastLoc.x = 1e9; k.damperZ = 0; }
+        if (c.id == id) for (auto& k : c.corners) { k.lastLoc.x = 1e9; k.damperZ = 0; k.linkRun[0] = k.linkRun[1] = k.shaftRun = 0; }
 }
 static void tickFit(DWORD now) {
     {

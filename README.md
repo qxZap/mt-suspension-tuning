@@ -6,6 +6,12 @@ Brake disc, caliper, spacer, knuckle, coilover (rigid eyes, telescoping damper, 
 
 Needs the pak `qxZap_SuspensionVisuals_P` (the meshes under `/Game/SuspensionVisuals/` and the Big Brake Kit rows, Brake Pads, in the DataTableFramework reserved slot Slot01). Without it the pieces are plain shapes.
 
+The pak is in this repo, unpacked: [pak/qxZap_SuspensionVisuals_P](pak/qxZap_SuspensionVisuals_P) (Arini's meshes and the
+kit rows). Pack it with repak (`repak pack pak/qxZap_SuspensionVisuals_P`) and drop the `.pak` into
+`MotorTown/Content/Paks`; a new pak starts disabled until it is enabled under Mods [Review] in the main menu.
+[tools/brake_kits.py](tools/brake_kits.py) is the script that writes the kit rows (MoreTuning's `BrakeKits/run.py`; it
+needs that repo's pipeline to run).
+
 Settings: `Binaries\Win64\plugins\suspension_tuning.ini`, `[SuspensionTuning]` Range (60 m), MaxVehicles (8), BrakeInset (0.25). The per-car setup and paint are stored on the car (packed colour entries QXS<axle><A-F>, QX_*) and in this ini, which restores them when the game drops entries it does not know.
 
 ## Install

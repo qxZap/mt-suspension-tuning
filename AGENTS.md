@@ -1,9 +1,9 @@
-# AGENTS.md -- Suspension Visuals
+# AGENTS.md -- Suspension Tuning
 
 A native Motor Town plugin: one DLL loaded by
-[Plugin Loader](https://github.com/qxZap/mt-plugin-loader). Source is `plugins/suspension_visuals.cpp`.
+[Plugin Loader](https://github.com/qxZap/mt-plugin-loader). Source is `plugins/suspension_tuning.cpp`.
 `include/` is a copy of the loader's headers; refresh it from mt-plugin-loader when the
-api version changes. The source of truth is `D:\MTLiveMap\mt_loader\plugins\suspension_visuals.cpp`; copy changes here.
+api version changes. The source of truth is `D:\MTLiveMap\mt_loader\plugins\suspension_tuning.cpp`; copy changes here.
 
 ## Build and test
 

@@ -389,7 +389,7 @@ static void place(const Ref& c, V at, Q q, V s) {
 }
 
 // ---- one wheel's set ----
-enum { P_DISC, P_CALIPER, P_SHOCK, P_KNUCKLE, P_ARM, P_SHAFT, P_WEB, P_MOUNTS, P_SPACER, P_WEB2, P_MOUNTS2, P_SPLUGS, P_SHAFT2, P_BOOT, P_CBOT, P_CTOP, P_LINK1, P_LINK2, P_BUSH1, P_BUSH2, P_CVIN, P_BOOTW, P_BOOTC, P_BOOTI, P_DBODY, P_DROD, NPIECE };
+enum { P_DISC, P_CALIPER, P_SHOCK, P_KNUCKLE, P_ARM, P_SHAFT, P_WEB, P_MOUNTS, P_SPACER, P_WEB2, P_MOUNTS2, P_SPLUGS, P_SHAFT2, P_BOOT, P_CBOT, P_CTOP, P_LINK1, P_LINK2, P_BUSH1, P_BUSH2, P_CVIN, P_BOOTW, P_BOOTC, P_BOOTI, P_DBODY, P_DROD, P_SWAYBAR, P_SWAYEND, P_DROP, NPIECE };
 // Paint: the brake kits' ColorSlots (BrakeKits/run.py), stored by the game's Paint screen in Customization.BodyColors.
 enum { PC_CALIPER, PC_DISC, PC_SUSP, PC_DAMPER, PC_SPACER, PC_LUGS, PC_ARMS, PC_SHAFT, NPAINT };
 static const char* const PAINT_SLOTS[NPAINT] = {"QX_BrakeCaliper", "QX_BrakeDisc", "QX_Suspension", "QX_Damper", "QX_Spacer", "QX_Lugs", "QX_Arms", "QX_Shaft"};
@@ -452,6 +452,9 @@ struct Corner {
     double spin = 0, lastSpin = 0;  // the wheel's roll angle about its axle (rad)
     double damperZ = 0;  // the damper's length scale, fixed once (0 = not yet): it telescopes, never squeezes
     double linkRun[2] = {0, 0}, shaftRun = 0;  // lower arm links and shaft tube, fixed once: rigid, they swing and plunge
+    // sway bar (2026-11-09, the user's diagram): a rigid bar across the axle on the body, a drop link from each end down
+    // to the middle of the lower arm. The end is taken once (on the body); the drop link keeps its length and swings
+    V armMid{}, swayEnd{}; bool haveArm = false, haveSway = false, posed = false; double dropRun = 0, swayW = 1;
     int axle;       // 0 = the front axle, counted back: the Tuning section's "Axle 1, 2, ..."
 };
 struct Car {
@@ -900,6 +903,9 @@ static void measure(Corner& k, V scale) {
     k.eIn = lo > hi ? lo : hi;
 }
 
+static void pose(Corner& k, V hub, double steer, int kitMm, const Geo& g);
+struct Car;
+static void swayBars(Car& c);
 static void pose(Corner& k, V hub, double steer, int kitMm, const Geo& g) {
     Q qs = axisAngle({0, 0, 1}, steer);
     V in = rot(qs, {0, -k.side, 0}), up{0, 0, 1};
@@ -1037,6 +1043,8 @@ static void pose(Corner& k, V hub, double steer, int kitMm, const Geo& g) {
                 if (k.linkRun[b] <= 0 || fabs(r0 - k.linkRun[b]) > 1.5 * aw) k.linkRun[b] = r0;
                 place(k.piece[b ? P_LINK2 : P_LINK1], add(Jm, mul(u, 3.0 * aw)), yAlong(u), V{aw, k.linkRun[b] / 10, aw});
             }
+            k.armMid = mul(add(Jm, P), 0.5); k.haveArm = true; k.swayW = aw;
+            if (!k.haveSway) { k.swayEnd = add(k.armMid, V{0, 0, R * 0.35}); k.haveSway = true; }
         } else if (al > 1) place(k.piece[P_ARM], Jm, yAlong(mul(ad, 1 / al)), V{aw, al / 100, aw});
         if (k.driven) {
             V S = add(k.rest, V{0, -k.side * (k.eIn + R * 1.3), 0});
@@ -1187,6 +1195,10 @@ static void decorate(const Ref& veh) {
             k.piece[P_BUSH2] = makePiece(veh.ptr, parent, armBush.ptr, M_GREY);
             setMat(k.piece[P_BUSH1], mats[M_BLACK], 1);
             setMat(k.piece[P_BUSH2], mats[M_BLACK], 1);
+            k.piece[P_SWAYEND] = makePiece(veh.ptr, parent, armBush.ptr, M_GREY);
+            k.piece[P_DROP] = makePiece(veh.ptr, parent, armLink.ptr, M_GREY);
+            if (at.y < 0) k.piece[P_SWAYBAR] = makePiece(veh.ptr, parent, armLink.ptr, M_GREY);  // one per axle, on its left wheel
+            setMat(k.piece[P_SWAYEND], mats[M_BLACK], 1);
         }
         bool joints = suspMesh && shStub.ptr && cvBoot.ptr && cvInner.ptr;  // stub, outer joint, tube, inner joint
         if (k.driven) k.piece[P_SHAFT] = makePiece(veh.ptr, parent, joints ? shStub.ptr : suspMesh ? halfShaft.ptr : cylinder.ptr, M_BLACK);
@@ -1385,7 +1397,7 @@ static void saveFit() {
 }
 static void refit(long long id) {
     for (auto& c : cars)
-        if (c.id == id) for (auto& k : c.corners) { k.lastLoc.x = 1e9; k.damperZ = 0; k.linkRun[0] = k.linkRun[1] = k.shaftRun = 0; }
+        if (c.id == id) for (auto& k : c.corners) { k.lastLoc.x = 1e9; k.damperZ = 0; k.linkRun[0] = k.linkRun[1] = k.shaftRun = 0; k.haveSway = false; k.dropRun = 0; }
 }
 static void tickFit(DWORD now) {
     {
@@ -1492,6 +1504,28 @@ static void tickFit(DWORD now) {
     fp.inner = get<uintptr_t>(fp.button + oBtnInner);
     fp.held = false;
     MT_LOG("Brakes & Suspension button made");
+}
+
+// The sway bar of each axle: rigid across the body between the two ends, a bushing at each end, a drop link down to
+// each lower arm's middle that keeps its length (re-taken if the gap outgrows the bushing) and pivots at the arm.
+static void swayBars(Car& c) {
+    for (auto& a : c.corners) {
+        if (a.side > 0 || !a.haveSway || !usable(a.piece[P_SWAYBAR])) continue;
+        Corner* b = nullptr;
+        for (auto& o : c.corners) if (&o != &a && o.side > 0 && o.axle == a.axle && o.haveSway) b = &o;
+        if (!b || !(a.posed || b->posed)) continue;
+        double w = (a.swayW + b->swayW) / 2;
+        V d = sub(b->swayEnd, a.swayEnd); double l = len(d);
+        if (l > 1) place(a.piece[P_SWAYBAR], a.swayEnd, yAlong(mul(d, 1 / l)), V{w * 0.8, l / 10, w * 0.8});
+        for (Corner* k : {&a, b}) {
+            place(k->piece[P_SWAYEND], k->swayEnd, axisAngle(V{0, 0, 1}, 0), V{w, w, w});
+            V dd = sub(k->swayEnd, k->armMid); double dl = len(dd);
+            V u = dl > 1e-3 ? mul(dd, 1 / dl) : V{0, 0, 1};
+            double r0 = dl - 2.5 * w; if (r0 < 0.01) r0 = 0.01;
+            if (k->dropRun <= 0 || fabs(r0 - k->dropRun) > 1.5 * w) k->dropRun = r0;
+            place(k->piece[P_DROP], k->armMid, yAlong(u), V{w * 0.7, k->dropRun / 10, w * 0.7});
+        }
+    }
 }
 
 static void tick(void*) {
@@ -1635,7 +1669,7 @@ static void tick(void*) {
                     setMat(k.piece[P_MOUNTS], use[PC_ARMS]);
                     setMat(k.piece[P_MOUNTS2], use[PC_ARMS]);
                     setMat(k.piece[P_ARM], use[PC_ARMS]);
-                    for (int pc : {P_LINK1, P_LINK2, P_BUSH1, P_BUSH2}) setMat(k.piece[pc], use[PC_ARMS]);
+                    for (int pc : {P_LINK1, P_LINK2, P_BUSH1, P_BUSH2, P_SWAYBAR, P_SWAYEND, P_DROP}) setMat(k.piece[pc], use[PC_ARMS]);
                     setMat(k.piece[P_SHAFT], use[PC_SHAFT]);
                     setMat(k.piece[P_SHAFT2], use[PC_SHAFT]);
                     setMat(k.piece[P_BOOT], use[PC_SHAFT], 1);
@@ -1680,6 +1714,7 @@ static void tick(void*) {
                 if (first && told < 6) { told++; MT_LOG("%s %s: dirt %s (%d parameters)", objName(classOf(c.veh.ptr)).c_str(), objName(k.wheel.ptr).c_str(), src ? "from its wheel" : "-- the wheel has none", n); }
             }
         for (auto& k : c.corners) {
+            k.posed = false;
             if (!usable(k.wheel)) continue;
             V hub = readV(k.wheel.ptr + oRelLoc), sc = readV(k.wheel.ptr + oRelScale);
             double steer = steerOf(k.wheel.ptr);
@@ -1688,8 +1723,9 @@ static void tick(void*) {
             k.spin = kSpin ? -rr[0] * PI / 180 : 0;
             if (len(sub(hub, k.lastLoc)) < 0.05 && fabs(steer - k.lastSteer) < 0.002 && fabs(k.spin - k.lastSpin) < 0.004) continue;
             k.lastLoc = hub; k.lastSteer = steer; k.lastSpin = k.spin;
-            gStep = "pose"; pose(k, hub, steer, c.kitMm, geoOf(c.id, k.axle));
+            gStep = "pose"; pose(k, hub, steer, c.kitMm, geoOf(c.id, k.axle)); k.posed = true;
         }
+        gStep = "sway bar"; swayBars(c);
     }
 }
 

@@ -1030,11 +1030,12 @@ static void pose(Corner& k, V hub, double steer, int kitMm, const Geo& g) {
                 place(k.piece[b ? P_BUSH2 : P_BUSH1], Bs[b], straight, V{aw, aw, aw});
                 V ld = sub(Bs[b], Jm); double ll = len(ld);
                 V u = ll > 1e-3 ? mul(ld, 1 / ll) : V{0, -k.side, 0};
-                // rigid (the user, 2026-11-09: no tension, it swings down with the knuckle): the length is taken once,
-                // the link hangs from its bushing aimed at the ball, and the travel's small arc is lost inside the ball
-                if (k.linkRun[b] <= 0) { double r0 = ll - (3.0 + 2.5) * aw; k.linkRun[b] = r0 < 0.01 ? 0.01 : r0; }
-                double run = k.linkRun[b];
-                place(k.piece[b ? P_LINK2 : P_LINK1], sub(Bs[b], mul(u, 2.5 * aw + run)), yAlong(u), V{aw, run / 10, aw});
+                // rigid, pivoting at the knuckle (the user, 2026-11-09): the link hangs from the ball at its fixed
+                // length and the travel's small arc is lost in the bushing. Taken again if the gap outgrows the bushing
+                // (a length taken mid-setup left both links hanging in the air)
+                double r0 = ll - (3.0 + 2.5) * aw; if (r0 < 0.01) r0 = 0.01;
+                if (k.linkRun[b] <= 0 || fabs(r0 - k.linkRun[b]) > 1.5 * aw) k.linkRun[b] = r0;
+                place(k.piece[b ? P_LINK2 : P_LINK1], add(Jm, mul(u, 3.0 * aw)), yAlong(u), V{aw, k.linkRun[b] / 10, aw});
             }
         } else if (al > 1) place(k.piece[P_ARM], Jm, yAlong(mul(ad, 1 / al)), V{aw, al / 100, aw});
         if (k.driven) {
@@ -1067,7 +1068,7 @@ static void pose(Corner& k, V hub, double steer, int kitMm, const Geo& g) {
                 place(k.piece[P_CVIN], S, spun(d), V{bs, bs, bs});
                 place(k.piece[P_BOOTI], S, spun(mul(d, -1)), V{bs, bs, bs});
                 // rigid tube from the outer joint; its inner end plunges in the inner boot as the wheel travels
-                if (k.shaftRun <= 0) k.shaftRun = sl - 18 * bs;
+                if (k.shaftRun <= 0 || fabs(sl - 18 * bs - k.shaftRun) > 4 * bs) k.shaftRun = sl - 18 * bs;  // inside the boot
                 double run = k.shaftRun;
                 if (run > 0.5) place(k.piece[P_SHAFT], add(Jc, mul(d, 9 * bs)), spun(d), V{bs, run / 10, bs});
                 return;

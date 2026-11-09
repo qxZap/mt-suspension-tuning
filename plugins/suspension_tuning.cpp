@@ -1040,7 +1040,9 @@ static void pose(Corner& k, V hub, double steer, int kitMm, const Geo& g) {
                 // length and the travel's small arc is lost in the bushing. Taken again if the gap outgrows the bushing
                 // (a length taken mid-setup left both links hanging in the air)
                 double r0 = ll - (3.0 + 2.5) * aw; if (r0 < 0.01) r0 = 0.01;
-                if (k.linkRun[b] <= 0 || fabs(r0 - k.linkRun[b]) > 1.5 * aw) k.linkRun[b] = r0;
+                if (k.linkRun[b] <= 0) k.linkRun[b] = r0;  // kept within the bushing: it gives at the edge, never jumps
+                if (k.linkRun[b] < r0 - 1.5 * aw) k.linkRun[b] = r0 - 1.5 * aw;
+                if (k.linkRun[b] > r0 + 1.5 * aw) k.linkRun[b] = r0 + 1.5 * aw;
                 place(k.piece[b ? P_LINK2 : P_LINK1], add(Jm, mul(u, 3.0 * aw)), yAlong(u), V{aw, k.linkRun[b] / 10, aw});
             }
             k.armMid = mul(add(Jm, P), 0.5); k.haveArm = true; k.swayW = aw;
@@ -1076,7 +1078,11 @@ static void pose(Corner& k, V hub, double steer, int kitMm, const Geo& g) {
                 place(k.piece[P_CVIN], S, spun(d), V{bs, bs, bs});
                 place(k.piece[P_BOOTI], S, spun(mul(d, -1)), V{bs, bs, bs});
                 // rigid tube from the outer joint; its inner end plunges in the inner boot as the wheel travels
-                if (k.shaftRun <= 0 || fabs(sl - 18 * bs - k.shaftRun) > 4 * bs) k.shaftRun = sl - 18 * bs;  // inside the boot
+                // it may only plunge in, up to the inner ball's centre: past either end it gives just enough to stay
+                // inside -- never a gap at the boot (2026-11-09: long travel pulled it out)
+                if (k.shaftRun <= 0) k.shaftRun = sl - 18 * bs;
+                if (k.shaftRun < sl - 18 * bs) k.shaftRun = sl - 18 * bs;
+                if (k.shaftRun > sl - 10 * bs) k.shaftRun = sl - 10 * bs;
                 double run = k.shaftRun;
                 if (run > 0.5) place(k.piece[P_SHAFT], add(Jc, mul(d, 9 * bs)), spun(d), V{bs, run / 10, bs});
                 return;
@@ -1522,7 +1528,9 @@ static void swayBars(Car& c) {
             V dd = sub(k->swayEnd, k->armMid); double dl = len(dd);
             V u = dl > 1e-3 ? mul(dd, 1 / dl) : V{0, 0, 1};
             double r0 = dl - 2.5 * w; if (r0 < 0.01) r0 = 0.01;
-            if (k->dropRun <= 0 || fabs(r0 - k->dropRun) > 1.5 * w) k->dropRun = r0;
+            if (k->dropRun <= 0) k->dropRun = r0;
+            if (k->dropRun < r0 - 1.5 * w) k->dropRun = r0 - 1.5 * w;
+            if (k->dropRun > r0 + 1.5 * w) k->dropRun = r0 + 1.5 * w;
             place(k->piece[P_DROP], k->armMid, yAlong(u), V{w * 0.7, k->dropRun / 10, w * 0.7});
         }
     }

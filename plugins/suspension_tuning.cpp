@@ -110,6 +110,8 @@ static uintptr_t fMeshBounds, fLoc, fCompLoc, fCamMgr, fCamLoc, gameplayCDO, fMa
 static uintptr_t fPath, fRef, fLoad, systemCDO, fRendered;
 static int oParts = -1, oPartKey = -1, oPartSlot = -1, partSize;
 static int oId = -1;  // MTVehicle.Net_VehicleId: the key of a car's Tuning settings
+static bool kPaintSlots = true, kDirt = true, kSpin = true;  // [SuspensionTuning] PaintSlots / Dirt / Spin
+static int kSettleMs = 10000;                                // [SuspensionTuning] SettleSeconds
 static const char* volatile gStep = "-";  // what the tick is doing, for a fault's log line
 static int oBodyColors = -1, oColSlot, oColColor, colSize, oDiffComp = -1, oShaftComp = -1;  // paint, and whether a wheel is driven
 static const int SLOT_BRAKE_POWER = 202;  // EMTVehiclePartSlot::BrakePower (usmap 720T6)
@@ -454,6 +456,7 @@ struct Corner {
 struct Car {
     Ref veh; std::vector<Corner> corners; long long id = 0;
     int axles = 0; bool axleDriven[8] = {};
+    DWORD bornAt = 0;  // when it was decorated: its paint maps are left alone for a while
     DWORD resentAt = 0; int kitMm = 0, kitMat = M_GREY; std::string kit = "?";
     uint32_t paint[NPAINT] = {};  // FColor as painted, 0 = not painted
     Ref mid[NPAINT];              // this car's own material per painted slot
@@ -1212,6 +1215,7 @@ static void decorate(const Ref& veh) {
         if (k.driven) car.axleDriven[k.axle] = true;
     }
     if (oId >= 0) car.id = get<long long>(veh.ptr + oId);
+    car.bornAt = GetTickCount();
     MT_LOG("decorated %s: %d of %d wheels", objName(classOf(veh.ptr)).c_str(), (int)car.corners.size(), n);
     cars.push_back(std::move(car));
 }
@@ -1573,8 +1577,9 @@ static void tick(void*) {
     if (kits) kitAt = now + 1000;
     for (auto& c : cars) {
         if (kits && !c.corners.empty()) {  // a kit fitted or swapped in the garage
-            gStep = "paint slots"; addPaintSlots(c.veh.ptr);
-            gStep = "body colours"; addBodyColors(c.veh.ptr);
+            bool settled = (int)(now - c.bornAt) >= kSettleMs;
+            gStep = "paint slots"; if (kPaintSlots && settled) addPaintSlots(c.veh.ptr);
+            gStep = "body colours"; if (kPaintSlots && settled) addBodyColors(c.veh.ptr);
             gStep = "fit read";
             if (c.id && !(fp.dirty && fp.id == c.id)) {
                 Fit f{};
@@ -1657,7 +1662,7 @@ static void tick(void*) {
             }
         }
         gStep = "dirt";
-        if (kits && brakeMesh && dirtReady())
+        if (kits && kDirt && brakeMesh && dirtReady())
             for (auto& k : c.corners) {
                 if (!usable(k.wheel) || (k.dirtAt && (int)(now - k.dirtAt) < 3000)) continue;
                 bool first = !k.dirtAt;
@@ -1674,7 +1679,7 @@ static void tick(void*) {
             double steer = steerOf(k.wheel.ptr);
             if (len(sub(sc, k.lastScale)) > 1e-4) { k.lastScale = sc; measure(k, sc); k.lastLoc.x = 1e9; }  // wheel size tuned
             double rr[3]; rd(k.wheel.ptr + oRelRot, rr, sizeof rr);  // Pitch, Yaw, Roll: the wheel's spin is its pitch
-            k.spin = -rr[0] * PI / 180;
+            k.spin = kSpin ? -rr[0] * PI / 180 : 0;
             if (len(sub(hub, k.lastLoc)) < 0.05 && fabs(steer - k.lastSteer) < 0.002 && fabs(k.spin - k.lastSpin) < 0.004) continue;
             k.lastLoc = hub; k.lastSteer = steer; k.lastSpin = k.spin;
             gStep = "pose"; pose(k, hub, steer, c.kitMm, geoOf(c.id, k.axle));
@@ -1772,26 +1777,37 @@ static int onSendCustom(uintptr_t obj, uintptr_t, void* parms, void*) {
     MT_LOG("paint sent (%s): %d colours:%s", objName(classOf(obj)).c_str(), n, names.c_str());
     return 0;
 }
+static void migrateIni() {
+    // renamed from Suspension Visuals (2026-11-09): its ini moves over once, section and all, so setups and paint stay
+    std::wstring dir = gameDir() + L"plugins\\", from = dir + L"suspension_visuals.ini", to = dir + L"suspension_tuning.ini";
+    if (GetFileAttributesW(to.c_str()) != INVALID_FILE_ATTRIBUTES || GetFileAttributesW(from.c_str()) == INVALID_FILE_ATTRIBUTES) return;
+    FILE* f = _wfopen(from.c_str(), L"rb");
+    if (!f) return;
+    std::string text; char buf[4096]; size_t n;
+    while ((n = fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
+    fclose(f);
+    if (text.size() >= 2 && (unsigned char)text[0] == 0xFF && (unsigned char)text[1] == 0xFE) {  // UTF-16: replace as wide text
+        std::wstring w((const wchar_t*)(text.data() + 2), (text.size() - 2) / 2);
+        for (size_t at; (at = w.find(L"[SuspensionVisuals]")) != std::wstring::npos;) w.replace(at, 19, L"[SuspensionTuning]");
+        text.assign(text.data(), 2);
+        text.append((const char*)w.data(), w.size() * 2);
+    } else
+        for (size_t at; (at = text.find("[SuspensionVisuals]")) != std::string::npos;) text.replace(at, 19, "[SuspensionTuning]");
+    if (FILE* g = _wfopen(to.c_str(), L"wb")) { fwrite(text.data(), 1, text.size(), g); fclose(g); }
+    MoveFileW(from.c_str(), (from + L".migrated").c_str());
+    MT_LOG("settings moved over from suspension_visuals.ini");
+}
 static DWORD WINAPI run(LPVOID) {
     MT_LOG("Suspension Tuning loaded");
-    {   // renamed from Suspension Visuals (2026-11-09): its ini moves over once, section and all, so setups and paint stay
-        std::wstring dir = gameDir() + L"plugins\\", from = dir + L"suspension_visuals.ini", to = dir + L"suspension_tuning.ini";
-        if (GetFileAttributesW(to.c_str()) == INVALID_FILE_ATTRIBUTES && GetFileAttributesW(from.c_str()) != INVALID_FILE_ATTRIBUTES) {
-            if (FILE* f = _wfopen(from.c_str(), L"rb")) {
-                std::string text; char buf[4096]; size_t n;
-                while ((n = fread(buf, 1, sizeof buf, f)) > 0) text.append(buf, n);
-                fclose(f);
-                for (size_t at; (at = text.find("[SuspensionVisuals]")) != std::string::npos;) text.replace(at, 19, "[SuspensionTuning]");
-                if (FILE* g = _wfopen(to.c_str(), L"wb")) { fwrite(text.data(), 1, text.size(), g); fclose(g); }
-                MoveFileW(from.c_str(), (from + L".migrated").c_str());
-                MT_LOG("settings moved over from suspension_visuals.ini");
-            }
-        }
-    }
     kRange = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"Range", 60);
     kMax = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"MaxVehicles", 8);
     kInset = iniNum(L"suspension_tuning.ini", L"SuspensionTuning", L"BrakeInset", 0.25);
     kFlip = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"FlipShock", 0) != 0;
+    kPaintSlots = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"PaintSlots", 1) != 0;
+    kDirt = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"Dirt", 1) != 0;
+    kSpin = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"Spin", 1) != 0;
+    kSettleMs = 1000 * iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"SettleSeconds", 10);
+    MT_LOG("paint entries %s (after %d s), dirt %s, spin %s", kPaintSlots ? "on" : "OFF", kSettleMs / 1000, kDirt ? "on" : "OFF", kSpin ? "on" : "OFF");
     if (!api->wait_engine(INFINITE)) { MT_LOG("FAILED: no engine"); return 0; }
     cVeh = api->find_object("Class", "MTVehicle", "/Script/MotorTown");
     cWheel = api->find_object("Class", "MHWheelComponent", "/Script/MotorTown");
@@ -1960,6 +1976,7 @@ static DWORD WINAPI run(LPVOID) {
 
 extern "C" __declspec(dllexport) int PluginInit(const MtApi* a) {
     if (!attach(a)) return 1;
+    migrateIni();  // before anything opens the new ini: iniDisabled would create it and the move would skip
     if (iniDisabled(L"suspension_tuning.ini")) return 0;
     CloseHandle(CreateThread(nullptr, 0, run, nullptr, 0, nullptr));
     return 0;

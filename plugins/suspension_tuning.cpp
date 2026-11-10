@@ -1986,12 +1986,20 @@ static DWORD WINAPI run(LPVOID) {
             scanAt = GetTickCount() + 2000;  // about two seconds: the vehicles, and the blueprint wheel positions
             std::vector<Ref> v;
             std::map<uint64_t, V> r;
+            // 2026-11-10: is_a on all ~680k objects every scan cost ~1 s, half a core all session. The answer per
+            // class is cached (a few thousand classes); cleared now and then in case a class is freed and its
+            // address reused.
+            static std::unordered_map<uintptr_t, uint8_t> kind;  // 0 other, 1 vehicle, 2 wheel
+            static int scans;
+            if (++scans % 30 == 0) kind.clear();
             for (int i = 0, n = api->num_objects(); i < n; i++) {
                 uintptr_t o = api->object(i);
                 if (!o) continue;
                 uintptr_t c = classOf(o);
-                if (api->is_a(c, cVeh)) { if (!isCDO(o)) v.push_back({i, o}); continue; }
-                if (!api->is_a(c, cWheel)) continue;
+                auto k = kind.find(c);
+                if (k == kind.end()) k = kind.emplace(c, api->is_a(c, cVeh) ? 1 : api->is_a(c, cWheel) ? 2 : 0).first;
+                if (k->second == 1) { if (!isCDO(o)) v.push_back({i, o}); continue; }
+                if (k->second != 2) continue;
                 // the blueprint's own wheel: a CDO subobject, or an SCS template "Wheel0_GEN_VARIABLE" on the class
                 uintptr_t outer = outerOf(o);
                 if (!outer) continue;
@@ -2000,10 +2008,19 @@ static DWORD WINAPI run(LPVOID) {
                 } else if (api->is_a(classOf(outer), cClass)) {
                     std::string nm = objName(o);
                     size_t cut = nm.rfind("_GEN_VARIABLE");
-                    int base = cut != std::string::npos ? api->name_index(nm.substr(0, cut).c_str()) : 0;
+                    // name_index walks the whole FName pool: the real cost of this scan (~0.8 s). Indices never change.
+                    static std::unordered_map<std::string, int> nameIdx;
+                    int base = 0;
+                    if (cut != std::string::npos) {
+                        std::string b = nm.substr(0, cut);
+                        auto it = nameIdx.find(b);
+                        base = it != nameIdx.end() ? it->second : (nameIdx[b] = api->name_index(b.c_str()));
+                    }
                     if (base > 0) r[(uint64_t)get<int>(outer + L().obj_index) << 32 | (uint32_t)base] = readV(o + oRelLoc);
                 }
             }
+            if (scans <= 5 || scans % 300 == 0)
+                MT_LOG("scan %d: %zu vehicles, %d ms", scans, v.size(), (int)(GetTickCount() + 2000 - scanAt));
             std::lock_guard<std::mutex> g(lock);
             found.swap(v); foundRest.swap(r);
         }

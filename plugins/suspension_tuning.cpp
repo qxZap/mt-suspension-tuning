@@ -32,6 +32,8 @@
 //
 // Settings: plugins\suspension_tuning.ini [General] Disabled, [SuspensionTuning] Range (60 m),
 // MaxVehicles (8), BrakeInset (0.25: how far the disc sits inboard of the tyre centre, in tyre widths).
+// Per car, opt-in: Tuning > Brakes & Suspension > Detailed suspension On, and only on the player's own cars (not rented,
+// not another player's, not traffic or a dealer's); every other car gets nothing, so it costs nothing.
 //
 // shortcut: vehicles with fewer than three wheels (bikes) are skipped, and a dual-wheel pair gets
 // one set on the inner wheel. Solid axles still get a coilover per wheel.
@@ -105,12 +107,18 @@ static Q yAlong(V a) {  // Y on unit a, Z as near up as it can be (a flat piece 
 static const double PI = 3.14159265358979;
 
 // ---- engine ----
-static uintptr_t cVeh, cWheel, cMesh, fAdd, fFinish, fSetMesh, fMobility, fCollision, fShadow, fSetMaterial, fXf, fAttach, fDestroy;
+static uintptr_t cVeh, cWheel, cMesh, fAdd, fFinish, fSetMesh, fMobility, fCollision, fShadow, fSetMaterial, fXf, fAttach, fDestroy, fSetVisComp;
+static int oWheelVis = -1;   // MTVehicle.WheelVisualComponent: the vehicle's own drawing of its wheels
 static uintptr_t fMeshBounds, fLoc, fCompLoc, fCamMgr, fCamLoc, gameplayCDO, fMakeMid, matCDO, fMidColor, fToName, stringCDO;
 static uintptr_t fPath, fRef, fLoad, systemCDO, fRendered;
 static int oParts = -1, oPartKey = -1, oPartSlot = -1, partSize;
 static int oId = -1;  // MTVehicle.Net_VehicleId: the key of a car's Tuning settings
 static bool kPaintSlots = true, kDirt = true, kSpin = true;  // [SuspensionTuning] PaintSlots / Dirt / Spin
+static bool kAlignment = true;   // [SuspensionTuning] Alignment: the camber and the toe on the wheel
+static bool kTireVisual = true;  // [SuspensionTuning] TyreVisual: the plugin draws the tyre, so the camber sticks
+// The caster is the game's own (CasterDegree on the wheel); the camber and the toe the game has not, so they
+// are added to the wheel's rotation.
+static int oCaster = -1;
 static int kSettleMs = 10000;                                // [SuspensionTuning] SettleSeconds
 static const char* volatile gStep = "-";  // what the tick is doing, for a fault's log line
 static int oBodyColors = -1, oColSlot, oColColor, colSize, oDiffComp = -1, oShaftComp = -1;  // paint, and whether a wheel is driven
@@ -132,7 +140,7 @@ static uintptr_t loadAsset(const wchar_t* path) {
     api->process_event(systemCDO, fLoad, c);
     uintptr_t out = 0;
     memcpy(&out, c + got, 8);
-    return out;
+    return rooted(out);
 }
 
 // A mesh's local box: centre and full size.
@@ -402,7 +410,7 @@ static void place(const Ref& c, V at, Q q, V s) {
 }
 
 // ---- one wheel's set ----
-enum { P_DISC, P_CALIPER, P_SHOCK, P_KNUCKLE, P_ARM, P_SHAFT, P_WEB, P_MOUNTS, P_SPACER, P_WEB2, P_MOUNTS2, P_SPLUGS, P_SHAFT2, P_BOOT, P_CBOT, P_CTOP, P_LINK1, P_LINK2, P_BUSH1, P_BUSH2, P_CVIN, P_BOOTW, P_BOOTC, P_BOOTI, P_DBODY, P_DROD, P_SWAYBAR, P_SWAYEND, P_DROP, NPIECE };
+enum { P_DISC, P_CALIPER, P_SHOCK, P_KNUCKLE, P_ARM, P_SHAFT, P_WEB, P_MOUNTS, P_SPACER, P_WEB2, P_MOUNTS2, P_SPLUGS, P_SHAFT2, P_BOOT, P_CBOT, P_CTOP, P_LINK1, P_LINK2, P_BUSH1, P_BUSH2, P_CVIN, P_BOOTW, P_BOOTC, P_BOOTI, P_DBODY, P_DROD, P_SWAYBAR, P_SWAYEND, P_DROP, P_TIRE, NPIECE };
 // Paint: the brake kits' ColorSlots (BrakeKits/run.py), stored by the game's Paint screen in Customization.BodyColors.
 enum { PC_CALIPER, PC_DISC, PC_SUSP, PC_DAMPER, PC_SPACER, PC_LUGS, PC_ARMS, PC_SHAFT, NPAINT };
 static const char* const PAINT_SLOTS[NPAINT] = {"QX_BrakeCaliper", "QX_BrakeDisc", "QX_Suspension", "QX_Damper", "QX_Spacer", "QX_Lugs", "QX_Arms", "QX_Shaft"};
@@ -455,6 +463,8 @@ struct Corner {
     V rest;         // the blueprint's wheel position
     double side;    // +1 right of the centreline, -1 left
     V lastLoc, lastScale; double lastSteer;
+    double lastYaw = 0, lastRoll = 0;   // the wheel's own rotation, as the plugin last left it
+    double lastCaster = 0;              // the caster written to the wheel, so it is written once
     // from the wheel mesh and its scale
     double R, W, cIn, eIn;
     bool prop;      // the shock is the attachment's mesh, not a cylinder
@@ -463,6 +473,7 @@ struct Corner {
     DWORD dirtAt = 0;
     bool haveStraight = false; double straightX = 0, straightY = 0;  // the hub's x, y while not steered
     double spin = 0, lastSpin = 0;  // the wheel's roll angle about its axle (rad)
+    bool tireDrawn = false;         // the plugin draws this tyre, the game's wheel is hidden
     double damperZ = 0;  // the damper's length scale, fixed once (0 = not yet): it telescopes, never squeezes
     double linkRun[2] = {0, 0}, shaftRun = 0;  // lower arm links and shaft tube, fixed once: rigid, they swing and plunge
     // sway bar (2026-11-09, the user's diagram): a rigid bar across the axle on the body, a drop link from each end down
@@ -474,6 +485,7 @@ struct Car {
     Ref veh; std::vector<Corner> corners; long long id = 0;
     int axles = 0; bool axleDriven[8] = {};
     DWORD bornAt = 0;  // when it was decorated: its paint maps are left alone for a while
+    bool wheelVisHidden = false;  // the vehicle's own drawing of its wheels is hidden
     DWORD resentAt = 0; int kitMm = 0, kitMat = M_GREY; std::string kit = "?";
     uint32_t paint[NPAINT] = {};  // FColor as painted, 0 = not painted
     Ref mid[NPAINT];              // this car's own material per painted slot
@@ -482,7 +494,7 @@ struct Car {
 // ---- Tuning > Brakes & Suspension: where the pieces sit, per car and axle (2026-11-09, the user: "so the whole
 // thing fits nicely" on a supercar's inboard suspension as well as a truck's). Stored in suspension_tuning.ini,
 // [Vehicle<id>] Front.<key> / Rear.<key>, as spin-box steps.
-enum { F_AXLE, F_BRAKE, F_SPACER, F_UPIN, F_UPUP, F_LOWIN, F_LOWUP, F_TOPIN, F_TOPUP, F_TOPFWD, F_SIZE, F_ARMIN, F_ARMUP, F_ARMSPREAD, F_CVOFF, F_SPSIZE, NFIT };
+enum { F_AXLE, F_BRAKE, F_SPACER, F_UPIN, F_UPUP, F_LOWIN, F_LOWUP, F_TOPIN, F_TOPUP, F_TOPFWD, F_SIZE, F_ARMIN, F_ARMUP, F_ARMSPREAD, F_CVOFF, F_SPSIZE, F_HIDE, F_CAMBER, F_TOE, F_CASTER, NFIT };
 static const int MAXAXLE = 8;
 static const struct { const wchar_t* label; const wchar_t* key; int top, def; double zero, step; const wchar_t* unit; } FIT[NFIT] = {
     {L"Axle (* driven)", L"Axle", MAXAXLE - 1, 0, 0, 1, nullptr},
@@ -500,9 +512,19 @@ static const struct { const wchar_t* label; const wchar_t* key; int top, def; do
     {L"Lower arm pivot height", L"ArmUp", 200, 100, -100, 1, L"cm"},
     {L"Lower arm mount spacing", L"ArmSpreadCm", 150, 50, 0, 1, L"cm"},  // 0 joins the two mounts into one (8 bits: the 5 words are full)
     {L"Shaft joint position", L"CvOff", 200, 20, -10, 0.5, L"cm"},
-    {L"Spacer size", L"SpacerSize", 50, 10, 0.5, 0.05, L"x"}};  // diameter and bolt circle, to line the studs up with the wheel  // inboard of the hub boss; the stub follows
+    {L"Spacer size", L"SpacerSize", 50, 10, 0.5, 0.05, L"x"},
+    // 2026-11-12, the user: "configure it ... enabled on and off" -- and then: only "for vehicles that I own and I go
+    // specifically within tuning into suspension tuning, and I enable that feature on". Whole car (set on every axle);
+    // opt-in: 1 = shown, 0 (every car never switched on, and old saves) = no pieces at all.
+    {L"Detailed suspension", L"Show", 1, 0, 0, 1, nullptr},
+    // The alignment (2026-11-17, the user: "we have width, tuning radius ... but we don't have camber and toe").
+    // They go at the END of the table: the values are packed into the vehicle's own saved bits, and a new
+    // entry in the middle would shift every one of them.
+    {L"Camber (deg)", L"Camber", 140, 90, -45.0, 0.5, L"deg"},  // -45 (top in) to +25; the default 0
+    {L"Toe (deg)", L"Toe", 100, 50, -10.0, 0.2, L"deg"},        // -10 to +10; the default 0
+    {L"Caster (deg)", L"Caster", 100, 50, -10.0, 0.2, L"deg"}}; // -10 to +10; the default 0
 struct Fit { int v[MAXAXLE][NFIT]; };
-struct Geo { double spSize = 1, cvOff = 0, spread = 1, brake = 0, spacer = 0, upIn = 0, upUp = 0, lowIn = 0, lowUp = 0, topIn = 0, topUp = 0, topFwd = 0, size = 1, armIn = 0, armUp = 0; };
+struct Geo { double spSize = 1, cvOff = 0, spread = 1, brake = 0, spacer = 0, upIn = 0, upUp = 0, lowIn = 0, lowUp = 0, topIn = 0, topUp = 0, topFwd = 0, size = 1, armIn = 0, armUp = 0, camber = 0, toe = 0, caster = 0; };
 static std::map<long long, Fit> fits;
 static const int FIT_WORDS = 6;  // 24-bit words per axle (6 since the spacer size row: 5 held 120 bits)
 static int bitsOf(int top) { int b = 0; while ((1 << b) <= top) b++; return b; }
@@ -639,6 +661,9 @@ static Geo geoOf(long long id, int axle) {
     g.topIn = fitNum(k, a, F_TOPIN); g.topUp = fitNum(k, a, F_TOPUP); g.topFwd = fitNum(k, a, F_TOPFWD);
     g.size = fitNum(k, a, F_SIZE); g.armIn = fitNum(k, a, F_ARMIN); g.armUp = fitNum(k, a, F_ARMUP);
     g.spread = fitNum(k, a, F_ARMSPREAD); g.cvOff = fitNum(k, a, F_CVOFF); g.spSize = fitNum(k, a, F_SPSIZE);
+    // alignment off: a straight wheel, whatever is saved (the missing rows once saved their minimum, -45 deg camber)
+    if (kAlignment) { g.camber = fitNum(k, a, F_CAMBER); g.toe = fitNum(k, a, F_TOE); g.caster = fitNum(k, a, F_CASTER); }
+    else g.camber = g.toe = g.caster = 0;
     return g;
 }
 
@@ -890,14 +915,20 @@ static void addBodyColors(uintptr_t v) {
 static std::vector<Car> cars;
 
 // The wheel's axle in its parent's space: FRotationMatrix's Y axis, which the spin (pitch) leaves alone.
-static V axleOf(uintptr_t wheel) {
+// The camber and the toe are the plugin's own, so they are taken off again here: they tilt the axle
+// (a camber does) and the toe turns it, and without taking them off the plugin reads its own
+// tuning as a steering angle and re-poses the whole suspension every frame (2026-11-17: "the wheels
+// are constantly trying to respawn").
+static V axleOf(uintptr_t wheel, double camber = 0, double toe = 0) {
     double r[3]; rd(wheel + oRelRot, r, sizeof r);  // Pitch, Yaw, Roll in degrees
+    r[1] -= toe;
+    r[2] -= camber;
     double sp = sin(r[0] * PI / 180), cp = cos(r[0] * PI / 180), sy = sin(r[1] * PI / 180), cy = cos(r[1] * PI / 180),
            sr = sin(r[2] * PI / 180), cr = cos(r[2] * PI / 180);
     return {sr * sp * cy - cr * sy, sr * sp * sy + cr * cy, -sr * cp};
 }
-static double steerOf(uintptr_t wheel) {
-    V y = axleOf(wheel);
+static double steerOf(uintptr_t wheel, double camber = 0, double toe = 0) {
+    V y = axleOf(wheel, camber, toe);
     double a = atan2(-y.x, y.y);
     return a - PI * floor(a / PI + 0.5);  // a left wheel's mesh is turned half round
 }
@@ -1143,6 +1174,17 @@ static void pose(Corner& k, V hub, double steer, int kitMm, const Geo& g) {
         V sd = sub(S, kn); double sl = len(sd), sw = R * 0.13 < 3 ? 3 : R * 0.13 > 20 ? 20 : R * 0.13;
         if (sl > 1) put(k.piece[P_SHAFT], cylBox, add(kn, mul(sd, 0.5)), fromZ(mul(sd, 1 / sl)), {sw, sw, sl});
     }
+    // The tyre the plugin draws, with the alignment in it: the wheel's own rotation (the game writes
+    // it every frame, so a camber written on the wheel itself is taken away again) plus the camber and
+    // the toe the Tuning page sets.
+    if (usable(k.piece[P_TIRE])) {
+        // (not rd(): there is a local of that name in this function)
+        double rr[3]; api->read(k.wheel.ptr + oRelRot, rr, sizeof rr);   // the game's own rotation: pitch, yaw, roll
+        double roll = (rr[2] - k.side * g.camber) * PI / 180;    // a negative camber leans the top in
+        double yaw = (rr[1] - k.side * g.toe) * PI / 180;         // a positive toe points the front in
+        Q qTyre = qmul(axisAngle(V{1, 0, 0}, roll), qmul(axisAngle(V{0, 0, 1}, yaw), axisAngle(V{0, 1, 0}, k.spin)));
+        place(k.piece[P_TIRE], add(hub, mul(in, k.cIn)), qTyre, k.lastScale);
+    }
 }
 
 static V readV(uintptr_t at) { V v{}; rd(at, &v, sizeof v); return v; }
@@ -1151,11 +1193,42 @@ static std::mutex lock;  // the worker's lists, swapped in by the tick with try_
 static std::vector<Ref> found, candidates;
 static std::map<uint64_t, V> foundRest, rests;  // (class index << 32 | wheel name) -> the CDO wheel's RelativeLocation
 
+// Boats get no suspension, brakes or shafts (2026-11-11, the user: "the front and back have suspensions... disable
+// suspensions for boats"): their wheels are propellers. Same class words as the Boats plugin, [Boats] Vehicles in boats.ini.
+static std::vector<std::string> boatWords;
+static bool isBoat(uintptr_t cls) {
+    std::string n = objName(cls);
+    for (auto& c : n) c = (char)tolower((unsigned char)c);
+    for (auto& w : boatWords) if (!w.empty() && n.find(w) != std::string::npos) return true;
+    return false;
+}
+static void loadBoatWords() {
+    wchar_t buf[512] = {0};
+    GetPrivateProfileStringW(L"Boats", L"Vehicles", L"tugboat|ferry|boat_|ship_|containership", buf, 512, iniPath(L"boats.ini").c_str());
+    std::string w;
+    for (wchar_t* c = buf;; c++) {
+        if (!*c || *c == L'|') { if (!w.empty()) boatWords.push_back(w); w.clear(); if (!*c) break; }
+        else w += (char)tolower((int)*c);
+    }
+}
+
 static void decorate(const Ref& veh) {
     Car car{veh, {}};
+    // The vehicle draws its wheels itself (MTVehicle.WheelVisualComponent), and the wheel components
+    // draw their own mesh too. The plugin draws the tyre instead, so the camber can be in it: the
+    // game's own drawing is hidden and the plugin's piece takes its place. The wheel's collision
+    // stays where it is.
+    if (kTireVisual && oWheelVis >= 0 && fSetVisComp) {
+        uintptr_t wv = get<uintptr_t>(veh.ptr + oWheelVis);
+        if (wv) {
+            uint8_t hide = 0;
+            api->process_event(wv, fSetVisComp, &hide);
+            car.wheelVisHidden = true;
+        }
+    }
     uintptr_t arr = get<uintptr_t>(veh.ptr + oWheels);
     int n = get<int>(veh.ptr + oWheels + 8);
-    if (n < 3 || n > 32) { cars.push_back(car); return; }  // a bike, or nothing yet: kept so it is not tried every frame
+    if (n < 3 || n > 32 || isBoat(classOf(veh.ptr))) { cars.push_back(car); return; }  // a bike, or nothing yet: kept so it is not tried every frame
     uintptr_t clsIndex = get<int>(classOf(veh.ptr) + L().obj_index);
     std::vector<uintptr_t> wheels;
     for (int i = 0; i < n; i++) {
@@ -1184,6 +1257,24 @@ static void decorate(const Ref& veh) {
         measure(k, k.lastScale);
         uintptr_t parent = get<uintptr_t>(w + oParent);
         k.prop = usable(shock);
+        // The tyre, drawn by the plugin: the game writes the wheel's rotation every frame (its
+        // physics is a component tick, after the actor tick the plugin's work runs in), so a camber
+        // written on the wheel itself is taken away again -- there is no hook after the physics but
+        // the renderer. So the plugin draws the tyre (the wheel's own mesh and material) and the
+        // game's wheel is hidden; its collision stays.
+        if (kTireVisual) {
+            uintptr_t wm = get<uintptr_t>(k.wheel.ptr + oStaticMesh);
+            if (wm) {
+                k.piece[P_TIRE] = makePiece(veh.ptr, parent, wm, -1);   // the mesh keeps its own material
+                if (usable(k.piece[P_TIRE])) {
+                    uint8_t shadow = 1;
+                    api->process_event(k.piece[P_TIRE].ptr, fShadow, &shadow);
+                    uint8_t hide = 0;
+                    api->process_event(k.wheel.ptr, fSetVisComp, &hide);
+                    k.tireDrawn = true;
+                }
+            }
+        }
         k.piece[P_DISC] = makePiece(veh.ptr, parent, brakeMesh ? disc.ptr : cylinder.ptr, M_DISC);
         k.piece[P_CALIPER] = makePiece(veh.ptr, parent, brakeMesh ? caliper.ptr : cube.ptr, M_GREY);
         bool coSplit = suspMesh && coBot.ptr && coTop.ptr && coBody.ptr;
@@ -1284,8 +1375,11 @@ static void evidence(Car& car) {
             if (usable(pc)) api->process_event(pc.ptr, fRendered, &r);
             drawn += r.ret;
         }
-        MT_LOG("  %s: %d/%d pieces drawn | hub %.1f %.1f %.1f rest z %.1f -> up %.1f | steer %.1f deg | R %.1f W %.1f | disc %.1f cm off the hub (world) | shock centre %.1f cm off | spacer %.1f cm",
-               objName(k.wheel.ptr).c_str(), drawn, NPIECE, hub.x, hub.y, hub.z, k.rest.z, hub.z - k.rest.z, steerOf(k.wheel.ptr) * 180 / PI, k.R, k.W,
+        Geo gg = geoOf(car.id, k.axle);
+        MT_LOG("  %s: %d/%d pieces drawn | axle %d | hub %.1f %.1f %.1f rest z %.1f -> up %.1f | steer %.1f deg | camber %.1f toe %.1f caster %.1f | R %.1f W %.1f | disc %.1f cm off the hub (world) | shock centre %.1f cm off | spacer %.1f cm",
+               objName(k.wheel.ptr).c_str(), drawn, NPIECE, k.axle, hub.x, hub.y, hub.z, k.rest.z, hub.z - k.rest.z,
+               steerOf(k.wheel.ptr, -k.side * gg.camber, -k.side * gg.toe) * 180 / PI,
+               gg.camber, gg.toe, gg.caster, k.R, k.W,
                len(sub(dWorld, wWorld)), len(sub(sWorld, wWorld)), k.spacer);
     }
 }
@@ -1356,9 +1450,18 @@ static void fitShow(int i) {
         bool driven = c && fp.axle < 8 && c->axleDriven[fp.axle];
         swprintf_s(t, L"%d%s", fp.axle + 1, driven ? L" *" : L"");
     }
+    else if (i == F_HIDE) swprintf_s(t, L"%s", fitOf(fp.id).v[fp.axle][i] ? L"On" : L"Off");
     else if (FIT[i].unit[0] == L'x') swprintf_s(t, L"x%.2f", fitNum(fitOf(fp.id), fp.axle, i));
+    else if (FIT[i].unit[0] == L'd') swprintf_s(t, L"%+.2f deg", fitNum(fitOf(fp.id), fp.axle, i));
     else swprintf_s(t, L"%+.1f cm", fitNum(fitOf(fp.id), fp.axle, i));
     uiText(fp.rows[i].value, t);
+}
+// Every row on the open page shows the current values. A row that was not made (the alignment rows while
+// kAlignment is off) has no spin box: writing to it crashed the game the moment Detailed suspension was
+// switched on (2026-11-18, the car's saved setup came back and refreshed every row).
+static void fitRefresh() {
+    for (int i = 0; i < NFIT; i++)
+        if (fp.rows[i].spin) { spinSet(fp.rows[i].spin, toSpin(fitValue(i))); fitShow(i); }
 }
 static uintptr_t fitButton(uintptr_t screen, uintptr_t box, const wchar_t* label) {
     uintptr_t b = uiCreate(screen, cButton, box);
@@ -1379,7 +1482,22 @@ static void fitOpen(uintptr_t screen, uintptr_t box) {
         api->process_event(box, fChildAt, &at);
         if (at.ret) { uiShow(at.ret, false); fp.hidden.push_back(at.ret); }
     }
-    for (int i = 0; i < NFIT; i++) {
+    // The rows are stacked in the order they are created in. The detailed suspension's on/off goes
+    // to the top, above the axle selection (the user, 2026-11-17). The values are packed by their
+    // index in FIT, so the order the rows are made in does not move anything that is saved.
+    for (auto& r : fp.rows) r = {};  // rows from an earlier page are gone with it
+    int order[NFIT], n = 0;
+    order[n++] = F_HIDE;
+    order[n++] = F_AXLE;
+    for (int i = 1; i < NFIT; i++) {
+        if (i == F_HIDE) continue;
+        // the alignment rows are not made while the alignment is off: a control that does nothing
+        // is worse than no control
+        if (!kAlignment && (i == F_CAMBER || i == F_TOE || i == F_CASTER)) continue;
+        order[n++] = i;
+    }
+    for (int k = 0; k < n; k++) {
+        int i = order[k];
         uintptr_t w = uiCreate(screen, cSetting, box);
         uintptr_t spin = w ? get<uintptr_t>(w + oRowSpin) : 0;
         if (!spin) { MT_LOG("could not create the Brakes & Suspension rows"); return; }
@@ -1441,6 +1559,11 @@ static void tickFit(DWORD now) {
     uintptr_t vehicle = get<uintptr_t>(screen + oScreenVeh);
     long long id = vehicle && oId >= 0 ? get<long long>(vehicle + oId) : 0;
     if (id <= 0) return;
+    if (isBoatVehicle(vehicle)) {  // no suspension tuning on a boat (the user, 2026-11-13): no button, page closed if open
+        if (fp.open && usable(fp.screen)) fitClose();
+        fp.open = false;
+        return;
+    }
     if (!fp.dirty) fp.veh = vehicle;
     if (fp.screen.ptr != screen) {
         if (fp.dirty) { saveFit(); fp.dirty = 0; }
@@ -1452,7 +1575,7 @@ static void tickFit(DWORD now) {
         if (fp.id != id) {  // another car on the same screen
             if (fp.dirty) { saveFit(); fp.dirty = 0; }
             fp.id = id;
-            for (int i = 0; i < NFIT; i++) { spinSet(fp.rows[i].spin, toSpin(fitValue(i))); fitShow(i); }
+            fitRefresh();
             return;
         }
         if (fp.btnFrames > 0) {  // the game writes its own label over a new button for a few frames
@@ -1470,21 +1593,23 @@ static void tickFit(DWORD now) {
             memcpy(fitOf(id).v[fp.axle] + 1, clip + 1, sizeof(int) * (NFIT - 1));
             fp.dirty = now;
             refit(id);
-            for (int r = 0; r < NFIT; r++) { spinSet(fp.rows[r].spin, toSpin(fitValue(r))); fitShow(r); }
+            fitRefresh();
             MT_LOG("Brakes & Suspension: pasted onto axle %d", fp.axle + 1);
             return;
         }
         for (int i = 0; i < NFIT; i++) {
+            if (!fp.rows[i].spin) continue;  // a row that was not made reads as 0, which was saved as the setting's minimum
             int v = fromSpin(get<float>(fp.rows[i].spin + oSpinValue));
             int top = i == F_AXLE ? axleTop() : FIT[i].top;
             v = v < 0 ? 0 : v > top ? top : v;
             if (v == fitValue(i)) { fitShow(i); continue; }  // held at the end of its range the spin box writes its own number
             if (i == F_AXLE) {
                 fp.axle = v;
-                for (int r = 0; r < NFIT; r++) { spinSet(fp.rows[r].spin, toSpin(fitValue(r))); fitShow(r); }
+                fitRefresh();
                 return;
             }
             fitOf(id).v[fp.axle][i] = v;
+            if (i == F_HIDE) for (int a = 0; a < MAXAXLE; a++) fitOf(id).v[a][i] = v;  // a car-wide switch
             fp.dirty = now;
             if (loggingOn()) MT_LOG("fit axle %d %ls = %d (%.1f)", fp.axle + 1, FIT[i].key, v, fitNum(fitOf(id), fp.axle, i));
             fitShow(i);
@@ -1524,6 +1649,33 @@ static void tickFit(DWORD now) {
     MT_LOG("Brakes & Suspension button made");
 }
 
+// Only the player's own cars: the owner is this player (Net_OwnerPlayerState), and it is no rental and no dealer's car.
+// Other players' cars, traffic, rentals, test drives and dealer displays never get parts, whatever they carry.
+static bool mine(uintptr_t v) {
+    static int oOwnPS = -2, oRental = -1, oSeller = -1, oCtrlPS = -1;
+    if (oOwnPS == -2) {
+        oOwnPS = off(cVeh, "Net_OwnerPlayerState"); oRental = off(cVeh, "RentalComponent"); oSeller = off(cVeh, "SellerComponent");
+        if (uintptr_t cC = api->find_object("Class", "Controller", "/Script/Engine")) oCtrlPS = off(cC, "PlayerState");
+        if (oOwnPS < 0 || oCtrlPS < 0) MT_LOG("ownership fields not found: no car counts as yours, no parts");
+    }
+    if (oOwnPS < 0 || oCtrlPS < 0 || !fGetPCFit) return false;
+    if ((oRental >= 0 && get<uintptr_t>(v + oRental)) || (oSeller >= 0 && get<uintptr_t>(v + oSeller))) return false;
+    uintptr_t owner = get<uintptr_t>(v + oOwnPS);
+    if (!owner) return false;
+    struct { uintptr_t context; int index; uintptr_t ret; } pc = {v, 0, 0};
+    api->process_event(gameplayCDO, fGetPCFit, &pc);
+    return pc.ret && get<uintptr_t>(pc.ret + oCtrlPS) == owner;
+}
+// The car's "Detailed suspension" switch, opt-in: on only for the player's own car that has it switched on.
+static bool detailOff(uintptr_t v) {
+    if (!mine(v) || isBoatVehicle(v)) return true;  // never on a boat (the user, 2026-11-13)
+    long long id = oId >= 0 ? get<long long>(v + oId) : 0;
+    if (fp.dirty && fp.id == id) return fitOf(id).v[0][F_HIDE] == 0;  // being changed on the Tuning page right now
+    Fit f{};
+    if (readCarFit(v, f)) return f.v[0][F_HIDE] == 0;
+    return !(id > 0 && tunedHere(id) && fitOf(id).v[0][F_HIDE] != 0);
+}
+
 static void tick(void*) {
     if (lock.try_lock()) {
         if (!found.empty()) { candidates.swap(found); found.clear(); rests.swap(foundRest); foundRest.clear(); }
@@ -1549,7 +1701,7 @@ static void tick(void*) {
             V at{};
             api->process_event(candidates[i].ptr, fLoc, &at);
             double d = len(sub(at, cam));
-            if (d < kRange * 115.0) nearby.push_back({d, i});
+            if (d < kRange * 115.0 && !detailOff(candidates[i].ptr)) nearby.push_back({d, i});
         }
         std::sort(nearby.begin(), nearby.end());
         if ((int)nearby.size() > kMax) nearby.resize(kMax);
@@ -1628,7 +1780,7 @@ static void tick(void*) {
                 } else if (carries && memcmp(&f, &fitOf(c.id), sizeof f) != 0) {
                     fits[c.id] = f;
                     for (auto& k : c.corners) k.lastLoc.x = 1e9;
-                    if (fp.open && fp.id == c.id) for (int i = 0; i < NFIT; i++) { spinSet(fp.rows[i].spin, toSpin(fitValue(i))); fitShow(i); }
+                    if (fp.open && fp.id == c.id) fitRefresh();
                 }
             }
             gStep = "kit"; std::string key = fittedBrake(c.veh.ptr);
@@ -1714,10 +1866,28 @@ static void tick(void*) {
             k.posed = false;
             if (!usable(k.wheel)) continue;
             V hub = readV(k.wheel.ptr + oRelLoc), sc = readV(k.wheel.ptr + oRelScale);
-            double steer = steerOf(k.wheel.ptr);
+            Geo g = geoOf(c.id, k.axle);
+            // The steer, without the plugin's own camber and toe: they tilt the axle and turn it,
+            // and reading them back as a steering angle made the plugin re-pose the whole
+            // suspension every frame (2026-11-17: "the wheels are constantly trying to respawn").
+            double steer = steerOf(k.wheel.ptr, -k.side * g.camber, -k.side * g.toe);
             if (len(sub(sc, k.lastScale)) > 1e-4) { k.lastScale = sc; measure(k, sc); k.lastLoc.x = 1e9; }  // wheel size tuned
             double rr[3]; rd(k.wheel.ptr + oRelRot, rr, sizeof rr);  // Pitch, Yaw, Roll: the wheel's spin is its pitch
             k.spin = kSpin ? -rr[0] * PI / 180 : 0;
+            // The camber and the toe (2026-11-17). The game has neither, so they are added to the
+            // wheel's own rotation: the roll is the lean (a negative camber puts the top in) and the
+            // yaw is the steering, which the toe rides on (a positive toe points the front in). The
+            // game writes the rotation itself every frame, so this is the game's value plus the
+            // tuning -- but if it did not write it, ours is still there and adding again would double
+            // it, so the last written yaw and roll are remembered.
+            // The alignment is not written here: the game writes the wheel's rotation after this (its
+            // physics is a component tick, which runs after the actor tick this work runs in), so it
+            // would be taken away again and the wheel would rock. onCamera writes it once the camera
+            // is updated, which is after the physics.
+            // The caster is the game's own (CasterDegree on the wheel): 0 leaves it as it is, and
+            // it is written only when it changes -- the game sets it too, and writing it every frame
+            // fought the game over it (2026-11-17: "swapping the caster constantly is making the
+            // wheel respawn constantly").
             if (len(sub(hub, k.lastLoc)) < 0.05 && fabs(steer - k.lastSteer) < 0.002 && fabs(k.spin - k.lastSpin) < 0.004) continue;
             k.lastLoc = hub; k.lastSteer = steer; k.lastSpin = k.spin;
             gStep = "pose"; pose(k, hub, steer, c.kitMm, geoOf(c.id, k.axle)); k.posed = true;
@@ -1735,8 +1905,7 @@ static int faultFilter(unsigned code, EXCEPTION_POINTERS* ep) {
         faultAt = ep->ExceptionRecord->ExceptionAddress; faultCode = code;
         faultRead = ep->ExceptionRecord->NumberParameters > 1 ? (uintptr_t)ep->ExceptionRecord->ExceptionInformation[1] : 0;
     }
-    return code == EXCEPTION_ACCESS_VIOLATION || code == EXCEPTION_IN_PAGE_ERROR || code == EXCEPTION_DATATYPE_MISALIGNMENT
-        ? EXCEPTION_EXECUTE_HANDLER : EXCEPTION_CONTINUE_SEARCH;
+    return ownFaultOnly(code, ep);
 }
 static void logFault(LONG n) {
     HMODULE mod = nullptr; char name[MAX_PATH] = "?";
@@ -1772,6 +1941,7 @@ static void guardedTick(void* p) {
 static DWORD WINAPI paintWatch(LPVOID) {
     std::string last;
     for (;;) {
+        if (api->stopping()) return 0;   // the game is closing: this thread ends with it
         Sleep(16);
         uintptr_t v = gWatch.load();
         if (!v || oBodyColors < 0) continue;
@@ -1844,8 +2014,15 @@ static DWORD WINAPI run(LPVOID) {
     kPaintSlots = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"PaintSlots", 1) != 0;
     kDirt = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"Dirt", 1) != 0;
     kSpin = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"Spin", 1) != 0;
+    kAlignment = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"Alignment", 1) != 0;
+    // Off by default: the first version of this crashed the game while it decorated a car
+    // (2026-11-17 16:53), and a camber is not worth a crash. It is the switch to turn when
+    // that is understood.
+    kTireVisual = iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"TyreVisual", 0) != 0;
     kSettleMs = 1000 * iniInt(L"suspension_tuning.ini", L"SuspensionTuning", L"SettleSeconds", 10);
     MT_LOG("paint entries %s (after %d s), dirt %s, spin %s", kPaintSlots ? "on" : "OFF", kSettleMs / 1000, kDirt ? "on" : "OFF", kSpin ? "on" : "OFF");
+    MT_LOG("alignment: camber, toe and caster are per axle in the Tuning page (camber %.1f, toe %.1f, caster %.1f by default)",
+           FIT[F_CAMBER].zero, FIT[F_TOE].zero, FIT[F_CASTER].zero);
     if (!api->wait_engine(INFINITE)) { MT_LOG("FAILED: no engine"); return 0; }
     cVeh = api->find_object("Class", "MTVehicle", "/Script/MotorTown");
     cWheel = api->find_object("Class", "MHWheelComponent", "/Script/MotorTown");
@@ -1861,6 +2038,8 @@ static DWORD WINAPI run(LPVOID) {
     fAttach = api->find_object("Function", "K2_AttachToComponent", "SceneComponent");
     fCompLoc = api->find_object("Function", "K2_GetComponentLocation", "SceneComponent");
     fCollision = api->find_object("Function", "SetCollisionEnabled", "PrimitiveComponent");
+    fSetVisComp = api->find_object("Function", "SetVisibility", "SceneComponent");
+    if (cVeh) oWheelVis = off(cVeh, "WheelVisualComponent");
     fShadow = api->find_object("Function", "SetCastShadow", "PrimitiveComponent");
     fSetMaterial = api->find_object("Function", "SetMaterial", "PrimitiveComponent");
     fDestroy = api->find_object("Function", "K2_DestroyComponent", "ActorComponent");
@@ -1884,6 +2063,7 @@ static DWORD WINAPI run(LPVOID) {
         if (!p) { MT_LOG("FAILED: engine functions not found -- nothing drawn"); return 0; }
     oWheels = off(cVeh, "Wheels"); oRoot = off(cActor, "RootComponent"); oStaticMesh = off(cMesh, "StaticMesh");
     oRelLoc = off(cScene, "RelativeLocation"); oRelRot = off(cScene, "RelativeRotation"); oRelScale = off(cScene, "RelativeScale3D");
+    if (cWheel) oCaster = off(cWheel, "CasterDegree");
     oParent = off(cScene, "AttachParent");
     if (uintptr_t sPart = api->find_object("ScriptStruct", "MTVehiclePart", "/Script/MotorTown")) {
         oParts = off(cVeh, "Net_Parts"); oPartKey = off(sPart, "Key"); oPartSlot = off(sPart, "Slot");
@@ -2031,6 +2211,7 @@ static DWORD WINAPI run(LPVOID) {
 
 extern "C" __declspec(dllexport) int PluginInit(const MtApi* a) {
     if (!attach(a)) return 1;
+    loadBoatWords();
     migrateIni();  // before anything opens the new ini: iniDisabled would create it and the move would skip
     if (iniDisabled(L"suspension_tuning.ini")) return 0;
     CloseHandle(CreateThread(nullptr, 0, run, nullptr, 0, nullptr));
